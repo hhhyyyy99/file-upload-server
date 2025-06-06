@@ -52,7 +52,6 @@ export const getFilePath = (fileMd5: string, fileType: BigFileType, fileName: st
 export const mergeFileChunks = async (fileMd5: string, userUid: string, fileType: BigFileType, fileName: string, totalChunks: number): Promise<string> => {
   const chunkDir = getChunkDir(fileMd5, userUid);
   const filePath = getFilePath(fileMd5, fileType, fileName);
-console.log("filePath",filePath);
   // 检查所有块是否都已上传
   const chunkPaths = [];
   for (let i = 1; i <= totalChunks; i++) {
@@ -67,35 +66,51 @@ console.log("filePath",filePath);
   await fs.ensureFile(filePath);
   const writeStream = fs.createWriteStream(filePath);
 
+  // 按顺序写入每个分片
   for (const chunkPath of chunkPaths) {
     const buffer = await fs.readFile(chunkPath);
-    writeStream.write(buffer);
+    await new Promise<void>((resolve, reject) => {
+      writeStream.write(buffer, err => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
   }
 
-  writeStream.end();
-
-  return new Promise((resolve, reject) => {
-    writeStream.on('finish', async () => {
-      // 验证合并后的文件MD5是否正确
-      try {
-        const mergedFileMd5 = await md5File(filePath);
-        if (mergedFileMd5 !== fileMd5) {
-          await fs.unlink(filePath);
-          reject(new Error('文件MD5验证失败，合并后的文件与原始MD5不匹配'));
-        } else {
-          // 清理临时文件夹
-          await fs.remove(chunkDir);
-          resolve(filePath);
-        }
-      } catch (err) {
+  // 确保所有数据都写入完成
+  await new Promise<void>((resolve, reject) => {
+    writeStream.end((err: any) => {
+      if (err) {
+        console.error('写入流结束时出错:', err);
         reject(err);
+      } else {
+        console.log('写入流已结束');
+        resolve();
       }
     });
-
-    writeStream.on('error', err => {
-      reject(err);
-    });
   });
+
+  console.log('开始验证文件MD5');
+  // 验证合并后的文件MD5是否正确
+  try {
+    const mergedFileMd5 = await md5File(filePath);
+    console.log('MD5验证结果:', { mergedFileMd5, expectedMd5: fileMd5, match: mergedFileMd5 === fileMd5 });
+    
+    if (mergedFileMd5 !== fileMd5) {
+      console.log('MD5不匹配，删除文件:', filePath);
+      await fs.unlink(filePath);
+      throw new Error('文件MD5验证失败，合并后的文件与原始MD5不匹配');
+    } else {
+      console.log('MD5验证通过，清理临时文件夹:', chunkDir);
+      // 清理临时文件夹
+      await fs.remove(chunkDir);
+      console.log('文件合并完成:', filePath);
+      return filePath;
+    }
+  } catch (err) {
+    console.error('MD5验证过程出错:', err);
+    throw err;
+  }
 };
 
 /**

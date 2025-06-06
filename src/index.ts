@@ -17,6 +17,13 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// 设置请求超时时间为5分钟
+app.use((req, res, next) => {
+  req.setTimeout(5 * 60 * 1000); // 5分钟
+  res.setTimeout(5 * 60 * 1000); // 5分钟
+  next();
+});
+
 // 确保上传目录存在
 const uploadDir = path.join(__dirname, '../uploads');
 const tempDir = path.join(__dirname, '../temp');

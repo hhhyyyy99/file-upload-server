@@ -9,6 +9,12 @@ import { getChunkDir, getFilePath, mergeFileChunks, checkFileUploadStatus, creat
  */
 export const uploadFile = async (req: Request, res: Response) => {
   try {
+    console.log('开始处理文件上传请求:', {
+      hasFile: !!req.file,
+      body: req.body,
+      timestamp: new Date().toISOString(),
+    });
+
     if (!req.file) {
       return res.status(400).json({ success: false, message: '没有接收到文件' });
     }
@@ -28,16 +34,62 @@ export const uploadFile = async (req: Request, res: Response) => {
     const chunkDir = getChunkDir(totalFileMd5, user_uid);
     const chunkPath = path.join(chunkDir, chunk);
 
+    // 确保分块目录存在（防止并发时目录创建竞态条件）
+    await fs.ensureDir(chunkDir);
+
+    // 检查源文件是否存在
+    if (!(await fs.pathExists(req.file.path))) {
+      return res.status(400).json({
+        success: false,
+        message: '上传的临时文件不存在，请重新上传',
+      });
+    }
+
     // 保存分块
-    await fs.move(req.file.path, chunkPath, { overwrite: true });
+    console.log('开始保存分块:', { chunkPath, sourcePath: req.file.path });
+    try {
+      await fs.move(req.file.path, chunkPath, { overwrite: true });
+      console.log('分块保存成功:', chunkPath);
+    } catch (error) {
+      // 如果移动失败，尝试复制后删除源文件
+      if ((error as any).code === 'ENOENT') {
+        // 再次检查源文件是否存在
+        if (await fs.pathExists(req.file.path)) {
+          await fs.ensureDir(path.dirname(chunkPath));
+          await fs.copy(req.file.path, chunkPath, { overwrite: true });
+          await fs.unlink(req.file.path);
+        } else {
+          return res.status(400).json({
+            success: false,
+            message: '源文件在处理过程中丢失，请重新上传',
+          });
+        }
+      } else {
+        throw error;
+      }
+    }
 
-    // 检查是否所有分块都已上传
-    const uploadedChunks = await fs.readdir(chunkDir);
+    // 检查是否所有分块都已上传（优化性能：一次性读取目录）
+    const totalChunks = parseInt(chunks);
+    const uploadedFiles = await fs.readdir(chunkDir);
+    const uploadedChunksSet = new Set(uploadedFiles);
+    console.log('检查分块状态:', { totalChunks, uploadedFiles, currentChunk: chunk });
 
+    // 检查所有预期的分片是否都存在
+    let allChunksUploaded = true;
+    for (let i = 1; i <= totalChunks; i++) {
+      if (!uploadedChunksSet.has(`${i}`)) {
+        allChunksUploaded = false;
+        break;
+      }
+    }
+    console.log('所有分块是否已上传:', allChunksUploaded);
     // 如果所有分块都已上传，则合并文件
-    if (uploadedChunks.length === parseInt(chunks)) {
+    if (allChunksUploaded) {
+      console.log('开始合并文件:', { totalFileMd5, user_uid, name, totalChunks });
       try {
         const filePath = await mergeFileChunks(totalFileMd5, user_uid, file_type as BigFileType, name, parseInt(chunks));
+        console.log('文件合并成功:', filePath);
         return res.status(200).json({
           success: true,
           message: '文件上传成功',
